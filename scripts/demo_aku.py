@@ -2,10 +2,11 @@ import numpy as np
 from PIL import Image
 import torch
 import os 
+from tqdm import tqdm 
+
 from unidepth.models import UniDepthV1, UniDepthV2, UniDepthV2old
 from unidepth.utils import colorize, image_grid
 from unidepth.utils.camera import Pinhole
-import tqdm 
 
 def extract_number(filename):
     """
@@ -49,7 +50,10 @@ def load_ground_truth_depth(folder_path):
             depth_gt.append(depth)
     return depth_gt
 
-
+def batch_generator(array, batch_size=10):
+    """Yield successive batches from frame_paths."""
+    for i in range(0, len(array), batch_size):
+        yield array[i:i + batch_size]
 
 
 def demo(model):
@@ -59,44 +63,60 @@ def demo(model):
     
     # infer method of V1 uses still the K matrix as input
     if isinstance(model, (UniDepthV2old, UniDepthV1)):
-        camera = camera.K.squeeze(0)
+        camera = camera.K.squeeze(0)    
 
     # load images from folder 
     images_folder = "/home/gaps-canteras-u22/Documents/repos/UniDepth/assets/demo_2/Color_L"
-    images = load_torch_images(images_folder)
+    rgb_images = load_torch_images(images_folder)
 
     ground_truth_folder= "/home/gaps-canteras-u22/Documents/repos/UniDepth/assets/demo_2/Complete_Depth"
     depth_images_gt = load_ground_truth_depth(ground_truth_folder)
     
     os.makedirs("assets/demo_2/outputs", exist_ok=True)
 
-    for index, (rgb_image, depth_gt) in tqdm.tqdm(enumerate(zip(images, depth_images_gt))): 
+    device = next(model.parameters()).device
+    batch_size = 10
 
-        rgb_torch = torch.from_numpy(rgb_image).permute(2, 0, 1)
-        predictions = model.infer(rgb_torch, camera)
-     
-        # get GT and pred
-        depth_pred = predictions["depth"].squeeze().cpu().numpy()
+    for i in tqdm(range(0, len(rgb_images), batch_size), desc="Processing batches"):
+        
+        batch_rgb = rgb_images[i:i+batch_size]
+        batch_gt = depth_images_gt[i:i+batch_size]
 
-        # compute error, you have zero divison where depth_gt == 0.0
-        depth_arel = np.abs(depth_gt - depth_pred) / depth_gt
-        depth_arel[depth_gt == 0.0] = 0.0
+        assert len(rgb_images) == len(depth_images_gt), "Mismatch between RGB and depth frame counts"
 
-        # colorize
-        depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=10.0, cmap="magma_r")
-        depth_gt_col = colorize(depth_gt, vmin=0.01, vmax=10.0, cmap="magma_r")
-        depth_error_col = colorize(depth_arel, vmin=0.0, vmax=0.2, cmap="coolwarm")
+        rgb_tensors = torch.stack([
+            torch.from_numpy(img).permute(2, 0, 1).float() for img in batch_rgb
+        ]).to(device)  # (B, 3, H, W)
 
-        # save image with pred and error
-        artifact = image_grid([rgb_image, depth_gt_col, depth_pred_col, depth_error_col], 2, 2)
-        Image.fromarray(artifact).save(f"assets/demo_2/outputs/{index}_output.png")
+        # Camera intrinsics -> No estoy seguro de que esto se tenga que hacer así. 
+        if isinstance(model, (UniDepthV2old, UniDepthV1)):
+            camera = intrinsics_torch.squeeze(0).to(device)  # V1 expects single matrix
+        else:
+            camera = Pinhole(K=intrinsics_torch.unsqueeze(0))
 
-        print("Available predictions:", list(predictions.keys()))
-        print(f"ARel: {depth_arel[depth_gt > 0].mean() * 100:.2f}%")
+        with torch.no_grad():
+            predictions = model.infer(rgb_tensors, camera)
 
+        for j, rgb_img in enumerate(batch_rgb):
+            depth_pred = predictions["depth"][j].squeeze().cpu().numpy()
+            depth_gt = batch_gt[j] # np.array(Image.open(batch_gt[j])).astype(float) / 1000.0
+
+            # Compute relative error
+            depth_arel = np.abs(depth_gt - depth_pred) / np.maximum(depth_gt, 1e-6)
+            depth_arel[depth_gt == 0.0] = 0.0
+
+            # Colorize
+            depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=10.0, cmap="magma_r")
+            depth_gt_col = colorize(depth_gt, vmin=0.01, vmax=10.0, cmap="magma_r")
+            depth_error_col = colorize(depth_arel, vmin=0.0, vmax=0.2, cmap="coolwarm")
+
+            artifact = image_grid([rgb_img, depth_gt_col, depth_pred_col, depth_error_col], 2, 2)
+            out_path = os.path.join("assets/demo_2/outputs", f"frame_{i + j:04d}.png")
+            Image.fromarray(artifact).save(out_path)
+
+            print(f"[{i + j:04d}] ARel: {depth_arel[depth_gt > 0].mean() * 100:.2f}%")
 
 if __name__ == "__main__":
-
     print("Torch version:", torch.__version__)
     type_ = "b"  # available types: s, b, l
     name = f"unidepth-v2-vit{type_}14"
