@@ -3,6 +3,7 @@ from PIL import Image
 import torch
 import os 
 from tqdm import tqdm 
+import matplotlib.pyplot as plt
 
 from unidepth.models import UniDepthV1, UniDepthV2, UniDepthV2old
 from unidepth.utils import colorize, image_grid
@@ -55,6 +56,19 @@ def batch_generator(array, batch_size=10):
     for i in range(0, len(array), batch_size):
         yield array[i:i + batch_size]
 
+def plot_arel_values(arel_values, out_path):
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(arel_values, linestyle='-', color='royalblue')
+    plt.title("ARel over Time")
+    plt.xlabel("Frame Index")
+    plt.ylabel("ARel (%)")
+    plt.grid(True)
+    plt.tight_layout()
+    plot_path = os.path.join(out_path, "arel_over_time.png")
+    plt.savefig(plot_path)
+    plt.close()
+    print(f"ARel plot saved to {plot_path}")
 
 def demo(model):
     # load camera  
@@ -76,6 +90,7 @@ def demo(model):
 
     device = next(model.parameters()).device
     batch_size = 10
+    arel_values = []
 
     for i in tqdm(range(0, len(rgb_images), batch_size), desc="Processing batches"):
         
@@ -109,12 +124,16 @@ def demo(model):
             depth_pred_col = colorize(depth_pred, vmin=0.01, vmax=10.0, cmap="magma_r")
             depth_gt_col = colorize(depth_gt, vmin=0.01, vmax=10.0, cmap="magma_r")
             depth_error_col = colorize(depth_arel, vmin=0.0, vmax=0.2, cmap="coolwarm")
+            arel_values.append(depth_arel[depth_gt > 0].mean() * 100)
 
             artifact = image_grid([rgb_img, depth_gt_col, depth_pred_col, depth_error_col], 2, 2)
             out_path = os.path.join("assets/demo_2/outputs", f"frame_{i + j:04d}.png")
             Image.fromarray(artifact).save(out_path)
 
             print(f"[{i + j:04d}] ARel: {depth_arel[depth_gt > 0].mean() * 100:.2f}%")
+            arel_values.append(depth_arel[depth_gt > 0].mean() * 100)
+    
+    plot_arel_values(arel_values, "assets/demo_2/outputs")
 
 if __name__ == "__main__":
     print("Torch version:", torch.__version__)
